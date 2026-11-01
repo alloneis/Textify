@@ -56,6 +56,8 @@
 #define IDC_CONFIG_TEXT                 1010
 #define IDC_EDIT                        1011
 #define IDC_WEB_BUTTON_1                1012
+#define IDC_ADD_TO_DB                   2000
+#define IDC_ADD_TO_MANUAL_DB            2001
 
 // Next default values for new objects
 // 
@@ -63,7 +65,7 @@
 #ifndef APSTUDIO_READONLY_SYMBOLS
 #define _APS_NEXT_RESOURCE_VALUE        240
 #define _APS_NEXT_COMMAND_VALUE         32775
-#define _APS_NEXT_CONTROL_VALUE         1013
+#define _APS_NEXT_CONTROL_VALUE         2002
 #define _APS_NEXT_SYMED_VALUE           101
 #endif
 #endif

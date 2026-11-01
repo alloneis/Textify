@@ -26,6 +26,7 @@ public:
 	enum
 	{
 		TIMER_UPDATE_CHECK = 1,
+		TIMER_CONFIG_RELOAD,
 	};
 
 	BEGIN_MSG_MAP_EX(CMainDlg)
@@ -74,6 +75,13 @@ public:
 	LRESULT OnExit(UINT uMsg, WPARAM wParam, LPARAM lParam);
 
 private:
+	struct IniFileState
+	{
+		FILETIME lastWriteTime{};
+		ULONGLONG size = 0;
+		bool exists = false;
+	};
+
 	void ReloadMainIcon();
 	void ApplyUiLanguage();
 	void ApplyMouseAndKeyboardHotKeys();
@@ -83,6 +91,13 @@ private:
 	void InitNotifyIconData();
 	HICON LoadTrayIcon();
 	void NotifyIconRightClickMenu();
+	void ShowCapturedText(bool prependTagMarker = false, HWND targetWindow = NULL);
+	bool QueryIniFileState(IniFileState& state) const;
+	static bool IniFileStatesEqual(const IniFileState& first, const IniFileState& second);
+	void RememberIniFileState();
+	void CheckForIniChanges();
+	void ReloadConfigFromIni();
+	void ReconcileClippingDefaultLabels();
 	void Exit();
 
 	CIcon m_trayIcon;
@@ -95,4 +110,10 @@ private:
 	bool m_registeredHotKey = false;
 	bool m_checkingForUpdates = false;
 	bool m_closeWhenUpdateCheckDone = false;
+	bool m_textDialogOpen = false;
+	IniFileState m_appliedIniFileState;
+	IniFileState m_pendingIniFileState;
+	bool m_hasPendingIniFileState = false;
+	CString m_codeDefaultDestinationLabel;
+	CString m_manualDefaultDestinationLabel;
 };

@@ -1,5 +1,7 @@
 #include "stdafx.h"
 #include "SettingsDlg.h"
+#include "UserConfig.h"
+#include "ClippingIniFormat.h"
 
 BOOL CSettingsDlg::OnInitDialog(CWindow wndFocus, LPARAM lInitParam)
 {
@@ -28,13 +30,42 @@ BOOL CSettingsDlg::OnInitDialog(CWindow wndFocus, LPARAM lInitParam)
 
 	// Load ini file.
 	CEdit configText = CEdit(GetDlgItem(IDC_CONFIG_TEXT));
-	configText.SetWindowText(LoadIniFile());
+	CString storedIniText;
+	if(!LoadIniFile(storedIniText))
+	{
+		configText.SetReadOnly(TRUE);
+		CButton(GetDlgItem(IDOK)).EnableWindow(FALSE);
+		MessageBox(L"Could not read Textify.ini. The editor is read-only so the existing file cannot be overwritten.",
+			L"Textify - Settings", MB_ICONERROR);
+		m_wndEdit.SubclassWindow(configText);
+		return TRUE;
+	}
+	m_loadedStoredIniText = storedIniText;
+
+	FriendlyClippingArrays storedFriendlyArrays;
+	CString friendlyParseError;
+	bool friendlyArraysValid = ParseFriendlyClippingArrays(
+		storedIniText, storedFriendlyArrays, friendlyParseError);
+	bool storageNeedsNormalization = friendlyArraysValid &&
+		(storedFriendlyArrays.codePresent || storedFriendlyArrays.manualPresent);
+	CString editorIniText;
+	CString conversionError;
+	bool conversionSucceeded = ConvertClippingIniToEditorFormat(
+		storedIniText, editorIniText, conversionError);
+	if(!conversionSucceeded)
+	{
+		editorIniText = storedIniText;
+		configText.SetReadOnly(TRUE);
+		MessageBox(conversionError, L"Textify - Clipping configuration", MB_ICONERROR);
+	}
+	configText.SetWindowText(editorIniText);
 	configText.SetLimitText(0);
 
 	// Other initialization stuff.
 	m_wndEdit.SubclassWindow(configText);
-
-	CButton(GetDlgItem(IDOK)).EnableWindow(FALSE);
+	m_editorAvailable = conversionSucceeded;
+	CButton(GetDlgItem(IDOK)).EnableWindow(
+		m_editorAvailable && storageNeedsNormalization);
 
 	return TRUE;
 }
@@ -45,15 +76,43 @@ void CSettingsDlg::OnDestroy()
 
 void CSettingsDlg::OnConfigTextChange(UINT uNotifyCode, int nID, CWindow wndCtl)
 {
-	CButton(GetDlgItem(IDOK)).EnableWindow(TRUE);
+	if(m_editorAvailable)
+	{
+		m_editorChanged = true;
+		CButton(GetDlgItem(IDOK)).EnableWindow(TRUE);
+	}
 }
 
 void CSettingsDlg::OnOK(UINT uNotifyCode, int nID, CWindow wndCtl)
 {
+	if(!m_editorAvailable)
+		return;
+	CString currentStoredIniText;
+	if(!LoadIniFile(currentStoredIniText) ||
+		currentStoredIniText.Compare(m_loadedStoredIniText) != 0)
+	{
+		MessageBox(
+			L"Textify.ini changed after this editor was opened. Reopen More Settings so your save doesn't overwrite the newer file.",
+			L"Textify - Settings",
+			MB_ICONWARNING);
+		return;
+	}
+
 	CEdit configText = CEdit(GetDlgItem(IDC_CONFIG_TEXT));
 	CString str;
 	configText.GetWindowText(str);
-	SaveIniFile(str);
+	CString storedIniText;
+	CString conversionError;
+	if(!ConvertClippingIniToStorageFormat(str, storedIniText, conversionError))
+	{
+		MessageBox(conversionError, L"Textify - Clipping configuration", MB_ICONERROR);
+		return;
+	}
+	if(!SaveIniFile(storedIniText))
+	{
+		MessageBox(L"Could not save Textify.ini.", L"Textify - Settings", MB_ICONERROR);
+		return;
+	}
 
 	EndDialog(nID);
 }
@@ -66,7 +125,7 @@ void CSettingsDlg::OnCancel(UINT uNotifyCode, int nID, CWindow wndCtl)
 	CString text;
 	text.LoadString(IDS_SETTINGSDLG_WARNING_DISCARD_TEXT);
 
-	if(CButton(GetDlgItem(IDOK)).IsWindowEnabled() &&
+	if(m_editorChanged &&
 		MessageBox(text, title, MB_ICONWARNING | MB_YESNO | MB_DEFBUTTON2) != IDYES)
 	{
 		return;
@@ -86,96 +145,67 @@ UINT CSettingsDlg::OnGetDlgCode(LPMSG lpMsg)
 
 CPath CSettingsDlg::GetIniFilePath()
 {
-	CPath iniFilePath;
-	GetModuleFileName(NULL, iniFilePath.m_strPath.GetBuffer(MAX_PATH), MAX_PATH);
-	iniFilePath.m_strPath.ReleaseBuffer();
-	iniFilePath.RenameExtension(L".ini");
-	return iniFilePath;
+	return UserConfig::GetIniFilePath();
 }
 
-CString CSettingsDlg::LoadIniFile()
+bool CSettingsDlg::LoadIniFile(CString& result)
 {
-	HRESULT hr;
-
-	CPath iniFilePath = GetIniFilePath();
-
-	CAtlFile file;
-	hr = file.Create(iniFilePath, GENERIC_READ, FILE_SHARE_READ, OPEN_EXISTING);
-	ATLENSURE_RETURN_VAL(SUCCEEDED(hr), L"");
-
-	ULONGLONG fileSizeUlonglong;
-	hr = file.GetSize(fileSizeUlonglong);
-	ATLENSURE_RETURN_VAL(SUCCEEDED(hr), L"");
-
-	int fileSize = (int)fileSizeUlonglong;
-	int bytesToRead = fileSize;
-
-	bool unicode = false;
-
-	if(fileSize >= 2 && fileSize % 2 == 0)
-	{
-		BYTE twoBytes[2];
-		hr = file.Read(twoBytes, 2);
-		ATLENSURE_RETURN_VAL(SUCCEEDED(hr), L"");
-
-		// UTF16LE BOM.
-		if(twoBytes[0] == 0xFF && twoBytes[1] == 0xFE)
-		{
-			bytesToRead -= 2; // skip BOM
-			unicode = true;
-		}
-		else
-		{
-			file.Seek(0, FILE_BEGIN);
-		}
-	}
-
-	if(bytesToRead == 0)
-		return L"";
-
-	CString result;
-
-	if(unicode)
-	{
-		int charsToRead = bytesToRead / sizeof(WCHAR);
-		WCHAR* buffer = result.GetBuffer(charsToRead);
-		hr = file.Read(buffer, bytesToRead);
-		ATLENSURE_RETURN_VAL(SUCCEEDED(hr), L"");
-
-		result.ReleaseBuffer(charsToRead);
-	}
-	else
-	{
-		CStringA ansiContents;
-		char* buffer = ansiContents.GetBuffer(bytesToRead);
-		hr = file.Read(buffer, bytesToRead);
-		ATLENSURE_RETURN_VAL(SUCCEEDED(hr), L"");
-
-		ansiContents.ReleaseBuffer(bytesToRead);
-
-		CA2W unicodeContents(buffer, CP_ACP);
-		result = unicodeContents.m_psz;
-	}
-
-	return result;
+	return ReadIniTextFile(GetIniFilePath(), result);
 }
 
 bool CSettingsDlg::SaveIniFile(CString newFileContents)
 {
-	HRESULT hr;
-
 	CPath iniFilePath = GetIniFilePath();
+	CPath iniDirectory = iniFilePath;
+	iniDirectory.RemoveFileSpec();
+	WCHAR temporaryPath[MAX_PATH];
+	if(!GetTempFileName(iniDirectory, L"tfi", 0, temporaryPath))
+		return false;
 
-	CAtlFile file;
-	hr = file.Create(iniFilePath, GENERIC_WRITE, FILE_SHARE_READ, CREATE_ALWAYS);
-	ATLENSURE_RETURN_VAL(SUCCEEDED(hr), false);
+	HANDLE file = CreateFile(
+		temporaryPath,
+		GENERIC_WRITE,
+		0,
+		nullptr,
+		CREATE_ALWAYS,
+		FILE_ATTRIBUTE_NORMAL,
+		nullptr);
+	if(file == INVALID_HANDLE_VALUE)
+	{
+		DeleteFile(temporaryPath);
+		return false;
+	}
 
-	// UTF16LE BOM.
-	hr = file.Write("\xFF\xFE", 2);
-	ATLENSURE_RETURN_VAL(SUCCEEDED(hr), false);
+	auto writeAll = [file](const void* data, DWORD bytes)
+	{
+		const BYTE* cursor = static_cast<const BYTE*>(data);
+		while(bytes > 0)
+		{
+			DWORD written = 0;
+			if(!WriteFile(file, cursor, bytes, &written, nullptr) || written == 0)
+				return false;
+			cursor += written;
+			bytes -= written;
+		}
+		return true;
+	};
 
-	hr = file.Write(newFileContents.GetString(), newFileContents.GetLength() * sizeof(WCHAR));
-	ATLENSURE_RETURN_VAL(SUCCEEDED(hr), false);
+	const BYTE bom[] = { 0xFF, 0xFE };
+	ULONGLONG contentBytes64 =
+		static_cast<ULONGLONG>(newFileContents.GetLength()) * sizeof(WCHAR);
+	bool succeeded = contentBytes64 <= MAXDWORD &&
+		writeAll(bom, sizeof(bom)) &&
+		writeAll(newFileContents.GetString(), static_cast<DWORD>(contentBytes64)) &&
+		FlushFileBuffers(file) != FALSE;
+	CloseHandle(file);
 
+	if(!succeeded || !MoveFileEx(
+		temporaryPath,
+		iniFilePath,
+		MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+	{
+		DeleteFile(temporaryPath);
+		return false;
+	}
 	return true;
 }

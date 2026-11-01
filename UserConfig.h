@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ClippingIniFormat.h"
+
 struct HotKey
 {
 	int key;
@@ -31,6 +33,7 @@ class UserConfig
 public:
 	UserConfig();
 
+	static CPath GetIniFilePath();
 	bool LoadFromIniFile();
 	bool SaveToIniFile() const;
 
@@ -50,4 +53,6 @@ public:
 	int m_webButtonsPerRow;
 	std::vector<WebButtonInfo> m_webButtonInfos;
 	std::vector<CString> m_excludedPrograms;
+	std::vector<ClippingDestinationInfo> m_codeClippingDestinations;
+	std::vector<ClippingDestinationInfo> m_manualClippingDestinations;
 };

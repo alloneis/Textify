@@ -30,4 +30,5 @@ private:
 	HHOOK m_lowLevelMouseHook;
 
 	bool m_mouseDownEventHooked = false;
+	HWND m_targetWindow = NULL;
 };

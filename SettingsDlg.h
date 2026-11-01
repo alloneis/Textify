@@ -37,8 +37,11 @@ public:
 private:
 	CContainedWindowT<CEdit> m_wndEdit;
 	CFont m_fontConfigText;
+	bool m_editorAvailable = false;
+	bool m_editorChanged = false;
+	CString m_loadedStoredIniText;
 
 	static CPath GetIniFilePath();
-	static CString LoadIniFile();
+	static bool LoadIniFile(CString& result);
 	static bool SaveIniFile(CString newFileContents);
 };

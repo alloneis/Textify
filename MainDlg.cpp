@@ -5,6 +5,8 @@
 #include "TextDlg.h"
 #include "SettingsDlg.h"
 #include "Functions.h"
+#include "SelectionCapture.h"
+#include "VaultMarkerFormatter.h"
 #include "update.h"
 #include "version.h"
 
@@ -44,12 +46,16 @@ BOOL CMainDlg::OnInitDialog(CWindow wndFocus, LPARAM lInitParam)
 		SetTimer(TIMER_UPDATE_CHECK, 1000 * 10, NULL); // 10sec
 	}
 
+	RememberIniFileState();
+	SetTimer(TIMER_CONFIG_RELOAD, 500, NULL);
+
 	return TRUE;
 }
 
 void CMainDlg::OnDestroy()
 {
 	UninitMouseAndKeyboardHotKeys();
+	KillTimer(TIMER_CONFIG_RELOAD);
 
 	if(!m_config->m_hideTrayIcon)
 	{
@@ -111,16 +117,18 @@ void CMainDlg::OnHotKey(int nHotKeyID, UINT uModifiers, UINT uVirtKey)
 {
 	if(nHotKeyID == 1)
 	{
-		CPoint pt;
-		GetCursorPos(&pt);
-
-		CTextDlg dlgText(*m_config);
-		dlgText.DoModal(NULL, reinterpret_cast<LPARAM>(&pt));
+		ShowCapturedText(false, ::GetForegroundWindow());
 	}
 }
 
 void CMainDlg::OnTimer(UINT_PTR nIDEvent)
 {
+	if(nIDEvent == TIMER_CONFIG_RELOAD)
+	{
+		CheckForIniChanges();
+		return;
+	}
+
 	if(nIDEvent == TIMER_UPDATE_CHECK)
 	{
 		KillTimer(TIMER_UPDATE_CHECK);
@@ -193,6 +201,7 @@ void CMainDlg::OnOK(UINT uNotifyCode, int nID, CWindow wndCtl)
 	mouseHotKey.key = mouseKey;
 
 	m_config->SaveToIniFile();
+	RememberIniFileState();
 
 	ApplyMouseAndKeyboardHotKeys();
 
@@ -210,40 +219,8 @@ void CMainDlg::OnShowIni(UINT uNotifyCode, int nID, CWindow wndCtl)
 	INT_PTR nRet = settingsDlg.DoModal();
 	if(nRet == IDOK)
 	{
-		LANGID oldUiLanguage = m_config->m_uiLanguage;
-		bool oldCheckForUpdates = m_config->m_checkForUpdates;
-		bool oldHideTrayIcon = m_config->m_hideTrayIcon;
-
-		m_config.emplace();
-
-		LANGID newUiLanguage = m_config->m_uiLanguage;
-		bool newCheckForUpdates = m_config->m_checkForUpdates;
-		bool newHideTrayIcon = m_config->m_hideTrayIcon;
-
-		if(oldUiLanguage != newUiLanguage)
-		{
-			ApplyUiLanguage();
-		}
-
-		ApplyMouseAndKeyboardHotKeys();
-		ConfigToGui();
-
-		if(newHideTrayIcon != oldHideTrayIcon)
-		{
-			Shell_NotifyIcon(newHideTrayIcon ? NIM_DELETE : NIM_ADD, &m_notifyIconData);
-		}
-
-		if(newCheckForUpdates != oldCheckForUpdates && !m_checkingForUpdates)
-		{
-			if(newCheckForUpdates)
-			{
-				SetTimer(TIMER_UPDATE_CHECK, 1000 * 10, NULL); // 10sec
-			}
-			else
-			{
-				KillTimer(TIMER_UPDATE_CHECK);
-			}
-		}
+		ReloadConfigFromIni();
+		RememberIniFileState();
 	}
 }
 
@@ -265,13 +242,166 @@ LRESULT CMainDlg::OnMouseHookClicked(UINT uMsg, WPARAM wParam, LPARAM lParam)
 	// again, because the hooked coordinates end up incorrect for DPI-unaware
 	// applications in high DPI environment.
 
-	CPoint pt;
-	GetCursorPos(&pt);
-
-	CTextDlg dlgText(*m_config);
-	dlgText.DoModal(NULL, reinterpret_cast<LPARAM>(&pt));
+	const HotKey& mouseHotKey = m_config->m_mouseHotKey;
+	bool prependTagMarker =
+		mouseHotKey.key == VK_RBUTTON &&
+		mouseHotKey.ctrl &&
+		!mouseHotKey.alt &&
+		!mouseHotKey.shift;
+	ShowCapturedText(prependTagMarker, reinterpret_cast<HWND>(wParam));
 
 	return 0;
+}
+
+void CMainDlg::ShowCapturedText(bool prependTagMarker, HWND targetWindow)
+{
+	if(m_textDialogOpen)
+		return;
+
+	m_textDialogOpen = true;
+	if(m_registeredHotKey)
+	{
+		::UnregisterHotKey(m_hWnd, 1);
+		m_registeredHotKey = false;
+	}
+
+	CPoint pt;
+	GetCursorPos(&pt);
+	CString selectedText = CaptureCurrentSelection(targetWindow);
+	if(prependTagMarker)
+	{
+		selectedText = AddVaultSectionMarkers(
+			std::wstring(selectedText.GetString(), selectedText.GetLength())).c_str();
+	}
+	CTextDlg dlgText(
+		*m_config,
+		selectedText,
+		m_codeDefaultDestinationLabel,
+		m_manualDefaultDestinationLabel);
+	dlgText.DoModal(NULL, reinterpret_cast<LPARAM>(&pt));
+	m_textDialogOpen = false;
+	ApplyMouseAndKeyboardHotKeys();
+	m_codeDefaultDestinationLabel = dlgText.GetCodeDefaultDestinationLabel();
+	m_manualDefaultDestinationLabel = dlgText.GetManualDefaultDestinationLabel();
+	ReconcileClippingDefaultLabels();
+}
+
+bool CMainDlg::QueryIniFileState(IniFileState& state) const
+{
+	WIN32_FILE_ATTRIBUTE_DATA data{};
+	CPath iniFilePath = UserConfig::GetIniFilePath();
+	if(!GetFileAttributesEx(iniFilePath, GetFileExInfoStandard, &data))
+	{
+		DWORD error = GetLastError();
+		state = {};
+		return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
+	}
+
+	state.exists = true;
+	state.lastWriteTime = data.ftLastWriteTime;
+	state.size = (static_cast<ULONGLONG>(data.nFileSizeHigh) << 32) |
+		data.nFileSizeLow;
+	return true;
+}
+
+bool CMainDlg::IniFileStatesEqual(
+	const IniFileState& first,
+	const IniFileState& second)
+{
+	return first.exists == second.exists &&
+		(!first.exists ||
+			(first.size == second.size &&
+				CompareFileTime(&first.lastWriteTime, &second.lastWriteTime) == 0));
+}
+
+void CMainDlg::RememberIniFileState()
+{
+	IniFileState state;
+	if(QueryIniFileState(state))
+		m_appliedIniFileState = state;
+	m_hasPendingIniFileState = false;
+}
+
+void CMainDlg::CheckForIniChanges()
+{
+	IniFileState currentState;
+	if(!QueryIniFileState(currentState))
+		return;
+
+	if(IniFileStatesEqual(currentState, m_appliedIniFileState))
+	{
+		m_hasPendingIniFileState = false;
+		return;
+	}
+
+	// Require the same changed state on two consecutive timer ticks. Editors
+	// often replace INI files in several steps; this avoids loading a partial
+	// write while still applying changes in about one second.
+	if(!m_hasPendingIniFileState ||
+		!IniFileStatesEqual(currentState, m_pendingIniFileState))
+	{
+		m_pendingIniFileState = currentState;
+		m_hasPendingIniFileState = true;
+		return;
+	}
+
+	ReloadConfigFromIni();
+	m_appliedIniFileState = currentState;
+	m_hasPendingIniFileState = false;
+}
+
+void CMainDlg::ReloadConfigFromIni()
+{
+	LANGID oldUiLanguage = m_config->m_uiLanguage;
+	bool oldCheckForUpdates = m_config->m_checkForUpdates;
+	bool oldHideTrayIcon = m_config->m_hideTrayIcon;
+
+	// Always unregister first. ApplyMouseAndKeyboardHotKeys deliberately keeps
+	// an already registered keyboard shortcut, so re-registering is required
+	// when an external INI edit changes one non-zero shortcut to another.
+	UninitMouseAndKeyboardHotKeys();
+	m_config.emplace();
+	ReconcileClippingDefaultLabels();
+
+	if(oldUiLanguage != m_config->m_uiLanguage)
+		ApplyUiLanguage();
+
+	ApplyMouseAndKeyboardHotKeys();
+	ConfigToGui();
+
+	if(m_config->m_hideTrayIcon != oldHideTrayIcon)
+	{
+		Shell_NotifyIcon(m_config->m_hideTrayIcon ? NIM_DELETE : NIM_ADD, &m_notifyIconData);
+	}
+
+	if(m_config->m_checkForUpdates != oldCheckForUpdates && !m_checkingForUpdates)
+	{
+		if(m_config->m_checkForUpdates)
+			SetTimer(TIMER_UPDATE_CHECK, 1000 * 10, NULL); // 10sec
+		else
+			KillTimer(TIMER_UPDATE_CHECK);
+	}
+}
+
+void CMainDlg::ReconcileClippingDefaultLabels()
+{
+	auto reconcileDefaultLabel = [](const std::vector<ClippingDestinationInfo>& destinations, CString& label)
+	{
+		for(const auto& destination : destinations)
+		{
+			if(destination.label.CompareNoCase(label) == 0)
+			{
+				label = destination.label;
+				return;
+			}
+		}
+		if(destinations.empty())
+			label.Empty();
+		else
+			label = destinations.front().label;
+	};
+	reconcileDefaultLabel(m_config->m_codeClippingDestinations, m_codeDefaultDestinationLabel);
+	reconcileDefaultLabel(m_config->m_manualClippingDestinations, m_manualDefaultDestinationLabel);
 }
 
 LRESULT CMainDlg::OnTaskbarCreated(UINT uMsg, WPARAM wParam, LPARAM lParam)
@@ -505,7 +635,7 @@ void CMainDlg::ApplyMouseAndKeyboardHotKeys()
 		m_mouseGlobalHook.reset();
 	}
 
-	if(m_config->m_keybdHotKey.key != 0 && !m_registeredHotKey)
+	if(m_config->m_keybdHotKey.key != 0 && !m_registeredHotKey && !m_textDialogOpen)
 	{
 		m_registeredHotKey = RegisterConfiguredKeybdHotKey(m_config->m_keybdHotKey);
 		if(!m_registeredHotKey)

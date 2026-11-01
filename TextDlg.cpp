@@ -4,14 +4,111 @@
 #include "TextDlg.h"
 #include "WebAppLaunch.h"
 #include "Functions.h"
+#include "ClippingStore.h"
 
 namespace
 {
+	constexpr UINT CLIPPING_DESTINATION_MENU_BASE = 30000;
+	constexpr UINT_PTR TEXTIFY_SAVE_SHORTCUT_SUBCLASS_ID = 1;
+
+	LRESULT CALLBACK TextifySaveShortcutSubclassProc(
+		HWND hWnd,
+		UINT message,
+		WPARAM wParam,
+		LPARAM lParam,
+		UINT_PTR subclassId,
+		DWORD_PTR referenceData)
+	{
+		if(message == WM_KEYDOWN || message == WM_SYSKEYDOWN)
+		{
+			bool ctrl = (::GetKeyState(VK_CONTROL) & 0x8000) != 0;
+			bool alt = (::GetKeyState(VK_MENU) & 0x8000) != 0;
+			bool shift = (::GetKeyState(VK_SHIFT) & 0x8000) != 0;
+			bool firstPress = (lParam & (1LL << 30)) == 0;
+			UINT controlId = 0;
+			if((wParam == L'L' || wParam == L'l') && !shift)
+			{
+				if(ctrl && !alt)
+					controlId = IDC_ADD_TO_DB;
+				else if(alt && !ctrl)
+					controlId = IDC_ADD_TO_MANUAL_DB;
+			}
+
+			if(controlId != 0)
+			{
+				if(firstPress)
+				{
+					HWND root = ::GetAncestor(hWnd, GA_ROOT);
+					::PostMessage(root, WM_COMMAND, MAKEWPARAM(controlId, BN_CLICKED), 0);
+				}
+				return 0;
+			}
+		}
+		else if((message == WM_CHAR && wParam == 12) ||
+			(message == WM_SYSCHAR && (wParam == L'L' || wParam == L'l')))
+		{
+			bool ctrl = (::GetKeyState(VK_CONTROL) & 0x8000) != 0;
+			bool alt = (::GetKeyState(VK_MENU) & 0x8000) != 0;
+			bool shift = (::GetKeyState(VK_SHIFT) & 0x8000) != 0;
+			if(!shift && ((message == WM_CHAR && ctrl && !alt) ||
+				(message == WM_SYSCHAR && alt && !ctrl)))
+			{
+				return 0;
+			}
+		}
+
+		return ::DefSubclassProc(hWnd, message, wParam, lParam);
+	}
+
+	BOOL CALLBACK InstallTextifySaveShortcutSubclass(HWND hWnd, LPARAM lParam)
+	{
+		::SetWindowSubclass(
+			hWnd,
+			TextifySaveShortcutSubclassProc,
+			TEXTIFY_SAVE_SHORTCUT_SUBCLASS_ID,
+			0);
+		return TRUE;
+	}
+
+	BOOL CALLBACK RemoveTextifySaveShortcutSubclass(HWND hWnd, LPARAM lParam)
+	{
+		::RemoveWindowSubclass(
+			hWnd,
+			TextifySaveShortcutSubclassProc,
+			TEXTIFY_SAVE_SHORTCUT_SUBCLASS_ID);
+		return TRUE;
+	}
+
+	size_t FindClippingDestinationIndex(
+		const std::vector<ClippingDestinationInfo>& destinations,
+		const CString& label)
+	{
+		if(!label.IsEmpty())
+		{
+			for(size_t i = 0; i < destinations.size(); i++)
+			{
+				if(destinations[i].label.CompareNoCase(label) == 0)
+					return i;
+			}
+		}
+		return destinations.size();
+	}
+
+	CString EscapeClippingDestinationLabelForUi(CString label)
+	{
+		label.Replace(L"&", L"&&");
+		label.Replace(L"\t", L" ");
+		label.Replace(L"\r", L" ");
+		label.Replace(L"\n", L" ");
+		return label;
+	}
+
 	void AppendStringToTextifyResults(CString& string, CString append, std::vector<int>& indexes);
 	void GetAccessibleInfoFromPointMSAA(POINT pt, CWindow& outWindow, CString& outString, CRect& outRc, std::vector<int>& outIndexes);
 	bool GetAccessibleInfoFromPointUIA(POINT pt, CWindow& outWindow, CString& outString, CRect& outRc, std::vector<int>& outIndexes);
 	void GetAccessibleInfoFromPoint(TextRetrievalMethod method, POINT pt, CWindow& outWindow, CString& outString, CRect& outRc, std::vector<int>& outIndexes);
 	CSize GetEditControlTextSize(CEdit window, LPCTSTR lpszString, int nMaxWidth = INT_MAX);
+	CSize GetEditControlFirstLineSize(CEdit window, LPCTSTR lpszString);
 	CSize TextSizeToEditClientSize(HWND hWnd, CEdit editWnd, CSize textSize);
 	CSize EditClientSizeToTextSize(HWND hWnd, CEdit editWnd, CSize editClientSize);
 }
@@ -20,27 +117,8 @@ BOOL CTextDlg::OnInitDialog(CWindow wndFocus, LPARAM lInitParam)
 {
 	CPoint& ptEvent = *reinterpret_cast<CPoint*>(lInitParam);
 
-	CWindow wndAcc;
-	CString strText;
-	CRect rcAccObject;
-	GetAccessibleInfoFromPoint(m_config.m_textRetrievalMethod, ptEvent, wndAcc, strText, rcAccObject, m_editIndexes);
-
-	// Check whether the target window is another TextDlg.
-	if(wndAcc)
-	{
-		CWindow wndAccRoot{ ::GetAncestor(wndAcc, GA_ROOT) };
-		if(wndAccRoot)
-		{
-			WCHAR szBuffer[32];
-			if(::GetClassName(wndAccRoot, szBuffer, ARRAYSIZE(szBuffer)) &&
-				wcscmp(szBuffer, L"TextifyEditDlg") == 0)
-			{
-				wndAccRoot.SendMessage(WM_CLOSE);
-				EndDialog(0);
-				return FALSE;
-			}
-		}
-	}
+	CString strText = m_initialText;
+	CRect rcAccObject{ ptEvent, CSize{ 0, 0 } };
 
 	// Allows to steal focus.
 	INPUT input{};
@@ -80,6 +158,7 @@ BOOL CTextDlg::OnInitDialog(CWindow wndFocus, LPARAM lInitParam)
 	}
 
 	InitWebAppButtons();
+	InitAddToDbButtons();
 
 	CString strDefaultText;
 	strDefaultText.LoadString(IDS_DEFAULT_TEXT);
@@ -108,8 +187,14 @@ BOOL CTextDlg::OnInitDialog(CWindow wndFocus, LPARAM lInitParam)
 	}
 
 	m_wndEdit.SubclassWindow(editWnd);
+	::EnumChildWindows(m_hWnd, InstallTextifySaveShortcutSubclass, 0);
 
 	return TRUE;
+}
+
+void CTextDlg::OnDestroy()
+{
+	::EnumChildWindows(m_hWnd, RemoveTextifySaveShortcutSubclass, 0);
 }
 
 HBRUSH CTextDlg::OnCtlColorStatic(CDCHandle dc, CStatic wndStatic)
@@ -146,6 +231,23 @@ void CTextDlg::OnExitSizeMove()
 
 void CTextDlg::OnCommand(UINT uNotifyCode, int nID, CWindow wndCtl)
 {
+	if(nID == IDC_ADD_TO_DB)
+	{
+		SaveCurrentTextToDatabase(
+			ClippingDestination::code,
+			m_codeDefaultDestinationLabel,
+			false);
+		return;
+	}
+	if(nID == IDC_ADD_TO_MANUAL_DB)
+	{
+		SaveCurrentTextToDatabase(
+			ClippingDestination::manual,
+			m_manualDefaultDestinationLabel,
+			false);
+		return;
+	}
+
 	int buttonIndex = nID - IDC_WEB_BUTTON_1;
 	if(buttonIndex >= 0 && buttonIndex < static_cast<int>(m_config.m_webButtonInfos.size()))
 	{
@@ -183,6 +285,103 @@ void CTextDlg::OnCommand(UINT uNotifyCode, int nID, CWindow wndCtl)
 	}
 }
 
+LRESULT CTextDlg::OnNotify(int idCtrl, LPNMHDR pnmh)
+{
+	if(pnmh->code == BCN_DROPDOWN)
+	{
+		if(idCtrl == IDC_ADD_TO_DB)
+		{
+			ShowClippingDestinationMenu(ClippingDestination::code, GetDlgItem(idCtrl));
+			return 0;
+		}
+		if(idCtrl == IDC_ADD_TO_MANUAL_DB)
+		{
+			ShowClippingDestinationMenu(ClippingDestination::manual, GetDlgItem(idCtrl));
+			return 0;
+		}
+	}
+
+	SetMsgHandled(FALSE);
+	return 0;
+}
+
+bool CTextDlg::SaveCurrentTextToDatabase(
+	ClippingDestination destination,
+	CString destinationLabel,
+	bool makeDefault)
+{
+	CString text;
+	m_wndEdit.GetWindowText(text);
+
+	// Reload on every save so an externally edited Textify.ini takes effect
+	// even in a Textify popup that was already open.
+	UserConfig liveConfig;
+	const auto& destinations = destination == ClippingDestination::code
+		? liveConfig.m_codeClippingDestinations
+		: liveConfig.m_manualClippingDestinations;
+	auto& cachedDestinations = destination == ClippingDestination::code
+		? m_config.m_codeClippingDestinations
+		: m_config.m_manualClippingDestinations;
+	cachedDestinations = destinations;
+	const wchar_t* databaseName = destination == ClippingDestination::code
+		? L"Code DB"
+		: L"Manual DB";
+
+	if(destinations.empty())
+	{
+		UpdateAddToDbButtonLabels();
+		CString error;
+		error.Format(
+			L"Configure at least one labeled %s destination in "
+			L"Textify.ini first.",
+			databaseName);
+		CString title;
+		title.Format(L"Textify - Add to %s", databaseName);
+		MessageBox(error, title, MB_ICONERROR);
+		return false;
+	}
+	size_t destinationIndex = FindClippingDestinationIndex(destinations, destinationLabel);
+	if(destinationIndex >= destinations.size())
+	{
+		if(makeDefault)
+		{
+			UpdateAddToDbButtonLabels();
+			CString error;
+			error.Format(
+				L"The selected %s destination changed in Textify.ini. "
+				L"Open the drop-down and choose it again.",
+				databaseName);
+			CString title;
+			title.Format(L"Textify - Add to %s", databaseName);
+			MessageBox(error, title, MB_ICONWARNING);
+			return false;
+		}
+		destinationIndex = 0;
+	}
+	CString& defaultLabel = destination == ClippingDestination::code
+		? m_codeDefaultDestinationLabel
+		: m_manualDefaultDestinationLabel;
+	// A menu choice becomes the session default immediately, even if the
+	// subsequent disk write fails. Direct saves also reconcile a removed or
+	// renamed default to the first configured entry.
+	if(makeDefault || defaultLabel.CompareNoCase(destinations[destinationIndex].label) != 0)
+		defaultLabel = destinations[destinationIndex].label;
+	UpdateAddToDbButtonLabels();
+
+	CString savedPath;
+	CString error;
+	if(!SaveNextClipping(destinations[destinationIndex].directory, text, savedPath, error))
+	{
+		CString title;
+		title.Format(L"Textify - Add to %s", databaseName);
+		MessageBox(error, title, MB_ICONERROR);
+		return false;
+	}
+
+	EndDialog(IDOK);
+	return true;
+}
+
 void CTextDlg::OnGetMinMaxInfo(LPMINMAXINFO lpMMI)
 {
 	lpMMI->ptMinTrackSize.x = m_minSize.cx;
@@ -213,19 +412,58 @@ void CTextDlg::OnSize(UINT nType, CSize size)
 		}
 	}
 
-	HDWP hDwp = ::BeginDeferWindowPos(numberOfWebAppButtons + 1);
+	HDWP hDwp = ::BeginDeferWindowPos(numberOfWebAppButtons + 3);
 	if(!hDwp)
 		return;
 
-	int firstButtonTop = clientRect.Height();
+	CButton codeDbButton(GetDlgItem(IDC_ADD_TO_DB));
+	CButton manualDbButton(GetDlgItem(IDC_ADD_TO_MANUAL_DB));
+	int codeDbButtonHeight = 0;
+	int manualDbButtonHeight = 0;
+	if(codeDbButton)
+	{
+		CRect rect;
+		codeDbButton.GetWindowRect(&rect);
+		codeDbButtonHeight = rect.Height();
+	}
+	if(manualDbButton)
+	{
+		CRect rect;
+		manualDbButton.GetWindowRect(&rect);
+		manualDbButtonHeight = rect.Height();
+	}
+	int firstButtonTop = clientRect.Height() - codeDbButtonHeight - manualDbButtonHeight;
+	if(codeDbButton)
+	{
+		codeDbButton.DeferWindowPos(
+			hDwp,
+			nullptr,
+			0,
+			firstButtonTop,
+			clientRect.Width(),
+			codeDbButtonHeight,
+			SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+	}
+	if(manualDbButton)
+	{
+		manualDbButton.DeferWindowPos(
+			hDwp,
+			nullptr,
+			0,
+			firstButtonTop + codeDbButtonHeight,
+			clientRect.Width(),
+			manualDbButtonHeight,
+			SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+	}
 	if(webAppButtonLast)
 	{
 		CRect webAppButtonLastRect;
 		webAppButtonLast.GetWindowRect(&webAppButtonLastRect);
 		::MapWindowPoints(nullptr, m_hWnd, &webAppButtonLastRect.TopLeft(), 2);
 
-		int newTop = clientRect.Height() - webAppButtonLastRect.Height();
+		int newTop = firstButtonTop - webAppButtonLastRect.Height();
 		int heightDelta = newTop - webAppButtonLastRect.top;
+		firstButtonTop = newTop;
 
 		webAppButtonLast.DeferWindowPos(hDwp, nullptr,
 			webAppButtonLastRect.left, webAppButtonLastRect.top + heightDelta,
@@ -403,6 +641,142 @@ void CTextDlg::InitWebAppButtons()
 	}
 }
 
+void CTextDlg::InitAddToDbButtons()
+{
+	ATLASSERT(!GetDlgItem(IDC_ADD_TO_DB));
+	ATLASSERT(!GetDlgItem(IDC_ADD_TO_MANUAL_DB));
+	CRect buttonRect{
+		0,
+		0,
+		ScaleForWindow(m_hWnd, 240),
+		ScaleForWindow(m_hWnd, 24)
+	};
+	CButton codeButton;
+	codeButton.Create(
+		m_hWnd,
+		buttonRect,
+		L"Add to Code DB (Ctrl+L)",
+		WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_SPLITBUTTON,
+		0,
+		IDC_ADD_TO_DB);
+	codeButton.SetFont(GetFont());
+
+	CButton manualButton;
+	manualButton.Create(
+		m_hWnd,
+		buttonRect,
+		L"Add to Manual DB (Alt+&L)",
+		WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_SPLITBUTTON,
+		0,
+		IDC_ADD_TO_MANUAL_DB);
+	manualButton.SetFont(GetFont());
+
+	UpdateAddToDbButtonLabels();
+
+	SIZE codeIdeal{};
+	SIZE manualIdeal{};
+	codeButton.SendMessage(BCM_GETIDEALSIZE, 0, reinterpret_cast<LPARAM>(&codeIdeal));
+	manualButton.SendMessage(BCM_GETIDEALSIZE, 0, reinterpret_cast<LPARAM>(&manualIdeal));
+	int idealWidth = max(buttonRect.Width(), max(codeIdeal.cx, manualIdeal.cx));
+	codeButton.SetWindowPos(NULL, 0, 0, idealWidth, buttonRect.Height(), SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+	manualButton.SetWindowPos(NULL, 0, 0, idealWidth, buttonRect.Height(), SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
+void CTextDlg::UpdateAddToDbButtonLabels()
+{
+	auto makeCaption = [](LPCWSTR databaseName, LPCWSTR shortcut,
+		const std::vector<ClippingDestinationInfo>& destinations, CString& defaultLabel)
+	{
+		CString caption;
+		if(destinations.empty())
+		{
+			defaultLabel.Empty();
+			caption.Format(L"Add to %s (not configured, %s)", databaseName, shortcut);
+		}
+		else
+		{
+			size_t defaultIndex = FindClippingDestinationIndex(destinations, defaultLabel);
+			if(defaultIndex >= destinations.size())
+				defaultIndex = 0;
+			defaultLabel = destinations[defaultIndex].label;
+			CString displayLabel = EscapeClippingDestinationLabelForUi(
+				destinations[defaultIndex].label);
+			caption.Format(L"Add to %s: %s (%s)", databaseName,
+				displayLabel.GetString(), shortcut);
+		}
+		return caption;
+	};
+
+	SetDlgItemText(
+		IDC_ADD_TO_DB,
+		makeCaption(L"Code DB", L"Ctrl+L", m_config.m_codeClippingDestinations,
+			m_codeDefaultDestinationLabel));
+	SetDlgItemText(
+		IDC_ADD_TO_MANUAL_DB,
+		makeCaption(L"Manual DB", L"Alt+&L", m_config.m_manualClippingDestinations,
+			m_manualDefaultDestinationLabel));
+}
+
+void CTextDlg::ShowClippingDestinationMenu(ClippingDestination destination, CWindow button)
+{
+	// Refresh the list at the moment the arrow is opened. This makes an
+	// externally saved Textify.ini visible without closing this popup.
+	UserConfig liveConfig;
+	auto& currentDestinations = destination == ClippingDestination::code
+		? m_config.m_codeClippingDestinations
+		: m_config.m_manualClippingDestinations;
+	currentDestinations = destination == ClippingDestination::code
+		? liveConfig.m_codeClippingDestinations
+		: liveConfig.m_manualClippingDestinations;
+	CString& defaultLabel = destination == ClippingDestination::code
+		? m_codeDefaultDestinationLabel
+		: m_manualDefaultDestinationLabel;
+	UpdateAddToDbButtonLabels();
+
+	if(currentDestinations.empty())
+	{
+		SaveCurrentTextToDatabase(destination, CString{}, false);
+		return;
+	}
+
+	CMenu menu;
+	menu.CreatePopupMenu();
+	size_t defaultIndex = FindClippingDestinationIndex(currentDestinations, defaultLabel);
+	if(defaultIndex >= currentDestinations.size())
+		defaultIndex = 0;
+	for(size_t i = 0; i < currentDestinations.size(); i++)
+	{
+		CString menuLabel = EscapeClippingDestinationLabelForUi(
+			currentDestinations[i].label);
+		UINT flags = MF_STRING;
+		if(i == defaultIndex)
+		{
+			menuLabel += L" (default)";
+			flags |= MF_CHECKED;
+		}
+		menu.AppendMenu(flags, CLIPPING_DESTINATION_MENU_BASE + static_cast<UINT>(i), menuLabel);
+	}
+
+	CRect buttonRect;
+	button.GetWindowRect(&buttonRect);
+	button.SendMessage(BCM_SETDROPDOWNSTATE, TRUE);
+	int command = menu.TrackPopupMenu(
+		TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RETURNCMD | TPM_RIGHTBUTTON,
+		buttonRect.left,
+		buttonRect.bottom,
+		m_hWnd);
+	button.SendMessage(BCM_SETDROPDOWNSTATE, FALSE);
+	if(command >= static_cast<int>(CLIPPING_DESTINATION_MENU_BASE))
+	{
+		size_t selectedIndex = static_cast<size_t>(command - CLIPPING_DESTINATION_MENU_BASE);
+		if(selectedIndex < currentDestinations.size())
+			SaveCurrentTextToDatabase(
+				destination,
+				currentDestinations[selectedIndex].label,
+				true);
+	}
+}
+
 void CTextDlg::AdjustWindowLocationAndSize(CPoint ptEvent, CRect rcAccObject, CString strText, CString strDefaultText)
 {
 	CEdit editWnd(GetDlgItem(IDC_EDIT));
@@ -424,13 +798,19 @@ void CTextDlg::AdjustWindowLocationAndSize(CPoint ptEvent, CRect rcAccObject, CS
 
 	CSize defTextSize = GetEditControlTextSize(editWnd, strDefaultText);
 	CSize defTextSizeClient = TextSizeToEditClientSize(m_hWnd, editWnd, defTextSize);
+	CSize firstLineSize = GetEditControlFirstLineSize(editWnd, strText);
+	CSize firstLineSizeClient = TextSizeToEditClientSize(m_hWnd, editWnd, firstLineSize);
 
 	m_minSize.cy = defTextSizeClient.cy;
 
 	int nMaxClientWidth = defTextSizeClient.cx > rcAccObject.Width() ? defTextSizeClient.cx : rcAccObject.Width();
 
-	CSize textSize = GetEditControlTextSize(editWnd, strText, nMaxClientWidth);
+	// Keep the first logical line on one visual line. The monitor-boundary
+	// handling below still clamps exceptionally long lines to the screen.
+	int layoutWidth = max(nMaxClientWidth, firstLineSize.cx);
+	CSize textSize = GetEditControlTextSize(editWnd, strText, layoutWidth);
 	CSize textSizeClient = TextSizeToEditClientSize(m_hWnd, editWnd, textSize);
+	textSizeClient.cx = max(textSizeClient.cx, firstLineSizeClient.cx);
 
 	if(textSizeClient.cx < rcAccObject.Width())
 	{
@@ -492,6 +872,19 @@ void CTextDlg::AdjustWindowLocationAndSize(CPoint ptEvent, CRect rcAccObject, CS
 			GetSystemMetricsForWindow(m_hWnd, SM_CXVSCROLL);
 	}
 
+	CButton codeDbButton(GetDlgItem(IDC_ADD_TO_DB));
+	CButton manualDbButton(GetDlgItem(IDC_ADD_TO_MANUAL_DB));
+	CRect codeDbButtonRect;
+	CRect manualDbButtonRect;
+	codeDbButton.GetWindowRect(&codeDbButtonRect);
+	manualDbButton.GetWindowRect(&manualDbButtonRect);
+	CSize codeDbButtonSize = codeDbButtonRect.Size();
+	CSize manualDbButtonSize = manualDbButtonRect.Size();
+	int databaseButtonsHeight = codeDbButtonSize.cy + manualDbButtonSize.cy;
+	rcClient.bottom += databaseButtonsHeight;
+	m_minSize.cx = max(m_minSize.cx, max(codeDbButtonSize.cx, manualDbButtonSize.cx));
+	m_minSize.cy += databaseButtonsHeight;
+
 	CRect rcWindow{ rcClient };
 	WndAdjustWindowRect(m_hWnd, &rcWindow);
 
@@ -543,6 +936,30 @@ void CTextDlg::AdjustWindowLocationAndSize(CPoint ptEvent, CRect rcAccObject, CS
 			rcClient = rcWindow;
 			WndUnadjustWindowRect(m_hWnd, &rcClient);
 		}
+	}
+
+	if(rcClient.Height() > databaseButtonsHeight)
+	{
+		rcClient.bottom -= databaseButtonsHeight;
+		codeDbButton.SetWindowPos(
+			NULL,
+			0,
+			rcClient.Height(),
+			rcClient.Width(),
+			codeDbButtonSize.cy,
+			SWP_NOZORDER | SWP_NOACTIVATE);
+		manualDbButton.SetWindowPos(
+			NULL,
+			0,
+			rcClient.Height() + codeDbButtonSize.cy,
+			rcClient.Width(),
+			manualDbButtonSize.cy,
+			SWP_NOZORDER | SWP_NOACTIVATE);
+	}
+	else
+	{
+		codeDbButton.ShowWindow(SW_HIDE);
+		manualDbButton.ShowWindow(SW_HIDE);
 	}
 
 	if(numberOfWebAppButtons > 0)
@@ -942,6 +1359,30 @@ namespace
 
 		oDC.SelectFont(pOldFont);
 
+		return rc.Size();
+	}
+
+	CSize GetEditControlFirstLineSize(CEdit window, LPCTSTR lpszString)
+	{
+		CString firstLine(lpszString ? lpszString : L"");
+		int newline = firstLine.FindOneOf(L"\r\n");
+		if(newline >= 0)
+			firstLine.Truncate(newline);
+
+		CFontHandle font = window.GetFont();
+		if(!font)
+			return CSize{};
+
+		CClientDC dc{ window };
+		CFontHandle previousFont = dc.SelectFont(font);
+		CRect rc{ 0, 0, 0, 0 };
+		dc.DrawTextEx(
+			firstLine.GetBuffer(),
+			firstLine.GetLength(),
+			&rc,
+			DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX | DT_EXPANDTABS);
+		firstLine.ReleaseBuffer();
+		dc.SelectFont(previousFont);
 		return rc.Size();
 	}
 

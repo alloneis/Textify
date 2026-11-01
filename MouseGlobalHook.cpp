@@ -127,9 +127,9 @@ LRESULT MouseGlobalHook::LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lPar
 			bool hotkeyUpDetected = false;
 
 			bool bModifiersMatch =
-				(GetKeyState(VK_CONTROL) < 0) == m_ctrlKey &&
-				(GetKeyState(VK_MENU) < 0) == m_altKey &&
-				(GetKeyState(VK_SHIFT) < 0) == m_shiftKey;
+				((GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0) == m_ctrlKey &&
+				((GetAsyncKeyState(VK_MENU) & 0x8000) != 0) == m_altKey &&
+				((GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0) == m_shiftKey;
 
 			if(bModifiersMatch)
 			{
@@ -170,17 +170,20 @@ LRESULT MouseGlobalHook::LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lPar
 			if(hotkeyDownDetected && !IsCursorOnExcludedProgram(msllHookStruct->pt))
 			{
 				m_mouseDownEventHooked = true;
+				m_targetWindow = ::GetForegroundWindow();
 				return 1;
 			}
 
 			if(hotkeyUpDetected && m_mouseDownEventHooked)
 			{
 				m_mouseDownEventHooked = false;
-				m_wndNotify.PostMessage(m_msgNotify, msllHookStruct->pt.x, msllHookStruct->pt.y);
+				m_wndNotify.PostMessage(m_msgNotify, reinterpret_cast<WPARAM>(m_targetWindow), 0);
+				m_targetWindow = NULL;
 				return 1;
 			}
 
 			m_mouseDownEventHooked = false;
+			m_targetWindow = NULL;
 		}
 	}
 

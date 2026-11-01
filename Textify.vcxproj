@@ -26,28 +26,28 @@
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">
     <ConfigurationType>Application</ConfigurationType>
     <UseDebugLibraries>true</UseDebugLibraries>
-    <PlatformToolset>v143</PlatformToolset>
+    <PlatformToolset>v145</PlatformToolset>
     <CharacterSet>Unicode</CharacterSet>
     <SpectreMitigation>false</SpectreMitigation>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
     <ConfigurationType>Application</ConfigurationType>
     <UseDebugLibraries>true</UseDebugLibraries>
-    <PlatformToolset>v143</PlatformToolset>
+    <PlatformToolset>v145</PlatformToolset>
     <CharacterSet>Unicode</CharacterSet>
     <SpectreMitigation>false</SpectreMitigation>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" Label="Configuration">
     <ConfigurationType>Application</ConfigurationType>
     <UseDebugLibraries>false</UseDebugLibraries>
-    <PlatformToolset>v143</PlatformToolset>
+    <PlatformToolset>v145</PlatformToolset>
     <CharacterSet>Unicode</CharacterSet>
     <SpectreMitigation>false</SpectreMitigation>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
     <ConfigurationType>Application</ConfigurationType>
     <UseDebugLibraries>false</UseDebugLibraries>
-    <PlatformToolset>v143</PlatformToolset>
+    <PlatformToolset>v145</PlatformToolset>
     <CharacterSet>Unicode</CharacterSet>
     <SpectreMitigation>false</SpectreMitigation>
   </PropertyGroup>
@@ -233,8 +233,11 @@
   <ItemGroup>
     <ClCompile Include="async_internet.cpp" />
     <ClCompile Include="Functions.cpp" />
+    <ClCompile Include="ClippingIniFormat.cpp" />
+    <ClCompile Include="ClippingStore.cpp" />
     <ClCompile Include="MainDlg.cpp" />
     <ClCompile Include="MouseGlobalHook.cpp" />
+    <ClCompile Include="SelectionCapture.cpp" />
     <ClCompile Include="SettingsDlg.cpp" />
     <ClCompile Include="Textify.cpp" />
     <ClCompile Include="stdafx.cpp">
@@ -247,12 +250,18 @@
     <ClCompile Include="update.cpp" />
     <ClCompile Include="URLEncode.cpp" />
     <ClCompile Include="UserConfig.cpp" />
+    <ClCompile Include="VaultMarkerFormatter.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="WebAppLaunch.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Functions.h" />
+    <ClInclude Include="ClippingIniFormat.h" />
+    <ClInclude Include="ClippingStore.h" />
     <ClInclude Include="MainDlg.h" />
     <ClInclude Include="MouseGlobalHook.h" />
+    <ClInclude Include="SelectionCapture.h" />
     <ClInclude Include="resource.h" />
     <ClInclude Include="SettingsDlg.h" />
     <ClInclude Include="stdafx.h" />
@@ -260,6 +269,7 @@
     <ClInclude Include="update.h" />
     <ClInclude Include="URLEncode.h" />
     <ClInclude Include="UserConfig.h" />
+    <ClInclude Include="VaultMarkerFormatter.h" />
     <ClInclude Include="version.h" />
     <ClInclude Include="WebAppLaunch.h" />
   </ItemGroup>
